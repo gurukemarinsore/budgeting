@@ -1121,6 +1121,8 @@
         let globalPeriodMonth = '';
         let globalPeriodYear = '';
         let apiBridgeFrame = null;
+        let apiBridgeTargetWindow = null;
+        let apiBridgeChannel = '';
         let apiBridgeReady = false;
         let apiBridgeReadyResolver = null;
         let apiBridgeReadyPromise = null;
@@ -1458,9 +1460,13 @@
                 apiBridgeReadyResolver = resolve;
             });
 
+            apiBridgeChannel = (window.crypto && typeof window.crypto.randomUUID === 'function')
+                ? window.crypto.randomUUID()
+                : `${Date.now()}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+
             apiBridgeFrame = document.createElement('iframe');
             apiBridgeFrame.id = 'gas-api-bridge';
-            apiBridgeFrame.src = `${GAS_EXEC_URL}?bridge=1`;
+            apiBridgeFrame.src = `${GAS_EXEC_URL}?bridge=1&channel=${encodeURIComponent(apiBridgeChannel)}`;
             apiBridgeFrame.style.display = 'none';
             apiBridgeFrame.setAttribute('aria-hidden', 'true');
             apiBridgeFrame.setAttribute('tabindex', '-1');
@@ -1468,15 +1474,21 @@
         }
 
         function handleApiBridgeMessage(event) {
-            if (!apiBridgeFrame || event.source !== apiBridgeFrame.contentWindow) return;
             const data = event.data || {};
 
+            // HtmlService GAS berjalan di iframe sandbox internal milik Google.
+            // Karena itu pesan READY berasal dari window sandbox tersebut, bukan dari
+            // contentWindow iframe /exec yang dibuat oleh halaman GitHub.
             if (data.type === 'budgeting-api-ready') {
+                if (!apiBridgeChannel || data.channel !== apiBridgeChannel || !event.source) return;
+                apiBridgeTargetWindow = event.source;
                 apiBridgeReady = true;
                 if (apiBridgeReadyResolver) apiBridgeReadyResolver();
                 return;
             }
 
+            if (!apiBridgeTargetWindow || event.source !== apiBridgeTargetWindow) return;
+            if (data.channel !== apiBridgeChannel) return;
             if (data.type !== 'budgeting-api-response' || !data.id) return;
             const pending = pendingApiCalls.get(data.id);
             if (!pending) return;
@@ -1514,8 +1526,16 @@
                     }, API_BRIDGE_TIMEOUT_MS);
 
                     pendingApiCalls.set(id, { resolve, reject, timer });
-                    apiBridgeFrame.contentWindow.postMessage({
+                    if (!apiBridgeTargetWindow) {
+                        pendingApiCalls.delete(id);
+                        clearTimeout(timer);
+                        reject(new Error('Koneksi ke backend Google Apps Script belum siap.'));
+                        return;
+                    }
+
+                    apiBridgeTargetWindow.postMessage({
                         type: 'budgeting-api-request',
+                        channel: apiBridgeChannel,
                         id,
                         functionName,
                         args
