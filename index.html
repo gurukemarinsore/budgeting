@@ -4,7 +4,14 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Budgeting</title>
-    <link rel="icon" href="https://i.imgur.com/Yxl2fhm.png" />
+    <!-- PWA Budgeting - revisi 058 -->
+    <link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="./icons/apple-touch-icon.png" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <meta name="theme-color" content="#187CFC">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="apple-mobile-web-app-title" content="Budgeting">
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- Google Fonts: Inter -->
@@ -14,6 +21,17 @@
     <!-- Chart.js -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
+        /* PWA: tampil hanya saat perangkat terdeteksi offline. */
+        #pwa-offline-overlay { position: fixed; inset: 0; z-index: 20000; display: flex; align-items: center; justify-content: center; padding: 1.5rem; background: #F8FAFC; }
+        #pwa-offline-overlay[hidden] { display: none !important; }
+        .pwa-offline-card { width: min(100%, 24rem); padding: 2rem; background: #fff; border: 1px solid #e2e8f0; border-radius: 1.5rem; text-align: center; box-shadow: 0 12px 40px rgba(15, 23, 42, .06); font-family: Inter, system-ui, sans-serif; color: #1E293B; }
+        .pwa-offline-card img { display: block; width: 4.5rem; height: 4.5rem; margin: 0 auto 1.25rem; object-fit: contain; }
+        .pwa-offline-card h2 { margin: 0 0 .75rem; font-size: 1.25rem; font-weight: 700; line-height: 1.4; }
+        .pwa-offline-card p { margin: 0; font-size: .9375rem; line-height: 1.6; color: #64748b; }
+        .pwa-offline-wait { display: flex; gap: .65rem; align-items: center; justify-content: center; margin-top: 1.5rem; font-size: .8125rem; color: #187CFC; }
+        .pwa-offline-spinner { width: 1rem; height: 1rem; border: 2px solid #dbeafe; border-top-color: #187CFC; border-radius: 50%; animation: pwa-offline-spin 1s linear infinite; }
+        @keyframes pwa-offline-spin { to { transform: rotate(360deg); } }
+        @media (prefers-reduced-motion: reduce) { .pwa-offline-spinner { animation: none; } }
         body { font-family: 'Inter', sans-serif; background-color: #F8FAFC; color: #1E293B; }
         .mandiri-gradient { background: linear-gradient(135deg, #187CFC 0%, #00569E 100%); }
         .category-soft-giving { background-color: rgba(236, 0, 141, 0.10) !important; color: #EC008D !important; }
@@ -462,6 +480,14 @@
     </style>
 </head>
 <body class="min-h-screen">
+    <div id="pwa-offline-overlay" hidden role="status" aria-live="polite" aria-atomic="true">
+        <div class="pwa-offline-card">
+            <img src="./icons/icon-192.png" width="72" height="72" alt="" aria-hidden="true">
+            <h2>Anda sedang offline</h2>
+            <p>Hubungkan ke internet untuk melanjutkan. Transaksi hanya dapat disimpan saat online.</p>
+            <div class="pwa-offline-wait"><span class="pwa-offline-spinner" aria-hidden="true"></span>Menunggu koneksi internet...</div>
+        </div>
+    </div>
 
     <!-- 1. HALAMAN LOGIN (Akan tampil jika belum terautentikasi) -->
     <div id="login-container" class="login-pattern-bg min-h-screen flex items-center justify-center bg-slate-50 p-6 no-print">
@@ -1139,6 +1165,68 @@
             'copyPreviousBudget', 'deleteBudget', 'addTransaction', 'updateTransaction', 'deleteTransaction'
         ]);
         const pendingApiCalls = new Map();
+        let pwaNeedsSessionCheck = false;
+        let pwaBlockedElements = [];
+        let pwaPreviousFocus = null;
+
+        // PWA hanya menyimpan halaman pemberitahuan offline dan ikon.
+        // Data GAS, login, dan transaksi tidak masuk cache service worker.
+        function updatePwaConnectionState() {
+            const offline = navigator.onLine === false;
+            const overlay = document.getElementById('pwa-offline-overlay');
+            if (!overlay) return;
+            overlay.hidden = !offline;
+
+            if (offline && pwaBlockedElements.length === 0) {
+                pwaPreviousFocus = document.activeElement;
+                pwaBlockedElements = Array.from(document.body.children)
+                    .filter(element => element !== overlay && !['SCRIPT', 'STYLE'].includes(element.tagName))
+                    .map(element => ({ element, wasInert: element.inert }));
+                pwaBlockedElements.forEach(({ element }) => { element.inert = true; });
+            } else if (!offline && pwaBlockedElements.length > 0) {
+                pwaBlockedElements.forEach(({ element, wasInert }) => { element.inert = wasInert; });
+                pwaBlockedElements = [];
+                if (pwaPreviousFocus && pwaPreviousFocus.isConnected) {
+                    pwaPreviousFocus.focus({ preventScroll: true });
+                }
+                pwaPreviousFocus = null;
+            }
+        }
+
+        function requirePwaOnline() {
+            if (navigator.onLine !== false) return;
+            updatePwaConnectionState();
+            const error = new Error('Anda sedang offline. Hubungkan ke internet untuk melanjutkan.');
+            error.code = 'OFFLINE';
+            throw error;
+        }
+
+        function initializePwa() {
+            updatePwaConnectionState();
+            window.addEventListener('offline', updatePwaConnectionState);
+            window.addEventListener('online', () => {
+                updatePwaConnectionState();
+                // Pulihkan penghubung yang gagal dimuat; jangan kirim ulang transaksi.
+                if (apiBridgeFrame && !apiBridgeReady) {
+                    apiBridgeFrame.src = `${GAS_EXEC_URL}?bridge=1&channel=${encodeURIComponent(apiBridgeChannel)}&pwa_retry=${Date.now()}`;
+                } else {
+                    initApiBridge();
+                }
+                if (pwaNeedsSessionCheck) {
+                    pwaNeedsSessionCheck = false;
+                    checkLoginState();
+                } else {
+                    refreshSharedData(true);
+                }
+            });
+
+            if ('serviceWorker' in navigator && window.isSecureContext) {
+                navigator.serviceWorker.register('./sw.js', { scope: './', updateViaCache: 'none' })
+                    .catch(error => console.warn('PWA belum siap; aplikasi online tetap dapat digunakan.', error));
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', initializePwa);
 
         window.addEventListener('message', handleApiBridgeMessage);
         window.addEventListener('popstate', handleBrowserBackNavigation);
@@ -1454,7 +1542,7 @@
 
         // BRIDGE API: frontend berada di GitHub, fungsi backend tetap dijalankan di Google Apps Script.
         function initApiBridge() {
-            if (apiBridgeFrame) return;
+            if (navigator.onLine === false || apiBridgeFrame) return;
 
             apiBridgeReadyPromise = new Promise(resolve => {
                 apiBridgeReadyResolver = resolve;
@@ -1513,7 +1601,9 @@
         }
 
         async function serverCall(functionName, ...args) {
+            requirePwaOnline();
             await waitForApiBridge();
+            requirePwaOnline();
             const isMutation = MUTATING_SERVER_FUNCTIONS.has(functionName);
             if (isMutation) activeServerMutationCount += 1;
 
@@ -1681,6 +1771,11 @@
 
         // FUNGSI UTAMA UNTUK LOGIN & LOGOUT
         async function checkLoginState() {
+            if (navigator.onLine === false) {
+                pwaNeedsSessionCheck = true;
+                updatePwaConnectionState();
+                return;
+            }
             const token = getToken();
             const loginContainer = document.getElementById('login-container');
             const mainApp = document.getElementById('main-app');
@@ -1709,6 +1804,11 @@
                 switchTab('beranda', { historyMode: 'replace', skipUnsavedGuard: true });
                 startAutoSync();
             } catch (error) {
+                if (navigator.onLine === false || error.code === 'OFFLINE') {
+                    pwaNeedsSessionCheck = true;
+                    updatePwaConnectionState();
+                    return;
+                }
                 clearSession();
                 loginContainer.classList.remove('hidden');
                 mainApp.classList.add('hidden');
@@ -1921,6 +2021,7 @@
         }
 
         async function refreshSharedData(silent = true, options = {}) {
+            if (navigator.onLine === false) return { skipped: true, reason: 'offline' };
             const token = getToken();
             const mainApp = document.getElementById('main-app');
             const isManual = Boolean(options.manual);
